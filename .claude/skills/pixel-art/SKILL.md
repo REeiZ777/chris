@@ -114,8 +114,10 @@ Characters look hand-animated when the body is a string-array sprite and only th
   interpolated with smoothstep. The held item and sleeves are drawn as outline stamps then a
   1–2 px core along the line, so any angle still reads as pixel art.
 - Drive everything from one cycle clock (`c = (T - cycle0) % P`) and fire events when `c`
-  crosses a threshold (start charge, release). A button or a click on the scene can jump the
-  clock to the start of the action, so the viewer can trigger it.
+  crosses a threshold (start charge, release). A button, a click on the scene and a key
+  (e.g. `E`, listened on `window`, ignoring repeats and text fields) jump the clock to the start
+  of the action, so the viewer can trigger it. Make the stage focusable (`tabindex="0"`) and
+  focus it on load and on click: inside an embedded frame, keys only arrive once the page has focus.
 - Sell the action with anticipation (raise/charge), a fast release (short swing, 1 px recoil)
   and a follow-through (hold, then ease back); idle gets breathing (upper rows shift 1 px),
   blinking and a few ambient particles.
