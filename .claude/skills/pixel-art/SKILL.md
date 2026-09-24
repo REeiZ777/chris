@@ -118,6 +118,14 @@ Characters look hand-animated when the body is a string-array sprite and only th
   (e.g. `E`, listened on `window`, ignoring repeats and text fields) jump the clock to the start
   of the action, so the viewer can trigger it. Make the stage focusable (`tabindex="0"`) and
   focus it on load and on click: inside an embedded frame, keys only arrive once the page has focus.
+- **Player control** (walk + attack): keep held keys in a `keys` object (keydown/keyup, cleared on
+  window blur), accept the user's layout (Q/D on AZERTY, A/D, arrows) and add hold buttons with
+  pointer events for touch screens. Draw the character into its own layer in local coordinates, then
+  blit it at an integer x offset, mirrored with `translate(pivot*2) + scale(-1, 1)` when facing left;
+  convert effect origins with the same `toWorld(x)` so spells fire in the facing direction.
+  Walking = 1 px bob twice per stride, hem shifted ±1 px, alternating boots, dust at each footfall.
+  Lock movement from anticipation until just after the release. Loop the action as a demo until
+  the player touches a control, then act only on input.
 - Sell the action with anticipation (raise/charge), a fast release (short swing, 1 px recoil)
   and a follow-through (hold, then ease back); idle gets breathing (upper rows shift 1 px),
   blinking and a few ambient particles.

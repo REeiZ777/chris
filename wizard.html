@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="en">
+<html lang="fr">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
@@ -33,24 +33,27 @@
   button:hover { border-color: #4b4890; }
   button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
   button[aria-pressed="true"] { border-color: var(--accent); color: var(--accent); }
+  button.hold { touch-action: none; user-select: none; -webkit-user-select: none; }
   .stage:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
   kbd { font: 600 10px/1 "JetBrains Mono", ui-monospace, monospace; color: var(--ink); border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 3px; padding: 1px 4px; }
 </style>
 </head>
 <body>
-<div class="stage" id="stage" tabindex="0" title="Click or press E to cast a spell">
-  <canvas id="view" aria-label="Pixel-art wizard in a red robe on a stone rampart under a full moon, raising a crystal staff to gather magic and firing a glowing bolt"></canvas>
+<div class="stage" id="stage" tabindex="0" title="Q / D pour se déplacer, E ou clic pour attaquer">
+  <canvas id="view" aria-label="Sorcier en pixel art, robe rouge, sur un rempart de pierre sous la pleine lune ; il se déplace avec Q et D et lance un sort avec E"></canvas>
 </div>
 <div class="bar">
   <div class="name">
     <h1>Moonlit Wizard</h1>
-    <span class="meta">150 × 112 px · rendered live · press <kbd>E</kbd> or click to cast</span>
+    <span class="meta"><kbd>Q</kbd> <kbd>D</kbd> se déplacer · <kbd>E</kbd> attaquer</span>
   </div>
   <div class="controls">
+    <button type="button" id="btn-left" class="hold" aria-label="Aller à gauche" aria-keyshortcuts="Q">◀ Q</button>
+    <button type="button" id="btn-right" class="hold" aria-label="Aller à droite" aria-keyshortcuts="D">D ▶</button>
+    <button type="button" id="btn-cast" aria-keyshortcuts="E">Attaquer (E)</button>
     <button type="button" id="btn-pause" aria-pressed="false">Pause</button>
-    <button type="button" id="btn-cast" aria-keyshortcuts="E">Cast spell (E)</button>
-    <button type="button" id="btn-sound" aria-pressed="false">Sound</button>
-    <button type="button" id="btn-full">Fullscreen</button>
+    <button type="button" id="btn-sound" aria-pressed="false">Son</button>
+    <button type="button" id="btn-full">Plein écran</button>
   </div>
 </div>
 <script>
@@ -93,6 +96,7 @@
   const bgBuf = mk(), bgx = bgBuf.getContext('2d');     // sky, stars, moon
   const fgBuf = mk(W, H + 4), fgx = fgBuf.getContext('2d'); // rampart + wizard
   const nrBuf = mk(), nrx = nrBuf.getContext('2d');     // magic in front
+  const wizBuf = mk(W, H + 4), wzx = wizBuf.getContext('2d'); // wizard in local space, mirrored when facing left
   let b = bgx;
 
   // ---------- static: banded, dithered night sky ----------
@@ -199,16 +203,22 @@
     if (up || right) RIM.push([WX + i, WY + j]);
   }));
 
-  function drawWizard(dy, blink) {
+  // dy: upper body sinks one row (breathing / walking bob); step: -1, 0, 1 stride
+  function drawWizard(dy, blink, step) {
     for (let j = 0; j < WIZ.length; j++) {
-      if (dy && j === 21) continue;                     // breathing: upper body sinks one row
+      if (dy && j === 21) continue;
       const y = WY + j + (dy && j <= 20 ? 1 : 0);
+      const sx = j >= 30 ? step : 0;                    // the hem swishes with each stride
       const row = WIZ[j];
       for (let i = 0; i < row.length; i++) {
         let ch = row[i]; if (ch === '.') continue;
         if (ch === 'e' && blink) ch = 'S';
-        pix(b, WX + i, y, PAL[ch]);
+        pix(b, WX + i + sx, y, PAL[ch]);
       }
+    }
+    // boots peeking under the hem, alternating while walking
+    for (const bx of [WX + 16 + step * 2, WX + 3 - step * 2]) {
+      rect(b, bx, WALL - 1, 3, 1, '#2a1622'); pix(b, bx, WALL - 1, '#4a2e3e');
     }
   }
   // sleeve from shoulder to hand: dark outline stamps, then cloth, then the hand
@@ -266,7 +276,7 @@
   function release(gx, gy) {
     burst = { x: gx, y: gy, t: 0 };
     rings.push({ x: gx, y: gy, t: 0, id: Math.random() * 1e6 | 0 });
-    bolt = { x: gx + 2, y: gy, t: 0 };
+    bolt = { x: gx + 2 * face, y: gy, t: 0, dir: face };
     for (let i = 0; i < 46; i++) { const a = rand(0, Math.PI * 2), s = rand(20, 85); spark(gx, gy, Math.cos(a) * s, Math.sin(a) * s, rand(0.5, 1.3), { drag: 2.4, grav: 8, dash: Math.random() < 0.4 }); }
     for (const o of orbs) spark(o.x, o.y, (o.x - gx) * 6, (o.y - gy) * 6, rand(0.3, 0.7), { c: o.c });
     orbs.length = 0;
@@ -277,19 +287,34 @@
   // ---------- controls ----------
   let paused = false;
   const reduce = window.matchMedia('(prefers-reduced-motion: reduce)');
-  let T = 0, cycle0 = 0, prevC = 0;
-  function castNow() { const c = ((T - cycle0) % P + P) % P; if (c < T_RAISE || c >= T_BACK) { cycle0 = T - T_RAISE; prevC = T_RAISE; } }
+  let T = 0, prevC = 0, casting = false, castStart = 0, idleSince = 0, auto = true;
+  let posX = 0, face = 1, walkPh = 0, lastStep = 0;
+  const keys = { left: false, right: false };
+  function startCast() { if (casting) return; casting = true; castStart = T; prevC = T_RAISE; }
+  function castNow() { auto = false; startCast(); }
   document.getElementById('btn-pause').addEventListener('click', e => {
-    paused = !paused; e.currentTarget.setAttribute('aria-pressed', String(paused)); e.currentTarget.textContent = paused ? 'Play' : 'Pause';
+    paused = !paused; e.currentTarget.setAttribute('aria-pressed', String(paused)); e.currentTarget.textContent = paused ? 'Lecture' : 'Pause';
   });
   document.getElementById('btn-cast').addEventListener('click', castNow);
   stage.addEventListener('click', () => { stage.focus({ preventScroll: true }); castNow(); });
-  // E casts from anywhere on the page (ignored while typing in a field)
+  // Q / D (or arrows) walk, E attacks — from anywhere on the page, except while typing in a field
+  const LEFT = new Set(['q', 'a', 'arrowleft']), RIGHT = new Set(['d', 'arrowright']);
+  const keyDir = e => { const k = (e.key || '').toLowerCase(); return LEFT.has(k) ? 'left' : RIGHT.has(k) ? 'right' : null; };
   window.addEventListener('keydown', e => {
-    if (e.repeat || e.ctrlKey || e.metaKey || e.altKey) return;
+    if (e.ctrlKey || e.metaKey || e.altKey) return;
     if (e.target instanceof HTMLElement && e.target.closest('input, textarea, select, [contenteditable="true"]')) return;
-    if (e.code === 'KeyE' || e.key === 'e' || e.key === 'E') { e.preventDefault(); castNow(); }
+    const d = keyDir(e);
+    if (d) { e.preventDefault(); keys[d] = true; auto = false; return; }
+    if (!e.repeat && (e.code === 'KeyE' || (e.key || '').toLowerCase() === 'e')) { e.preventDefault(); castNow(); }
   });
+  window.addEventListener('keyup', e => { const d = keyDir(e); if (d) keys[d] = false; });
+  window.addEventListener('blur', () => { keys.left = keys.right = false; });
+  // on-screen hold buttons for touch screens
+  for (const [id, d] of [['btn-left', 'left'], ['btn-right', 'right']]) {
+    const el = document.getElementById(id);
+    el.addEventListener('pointerdown', e => { keys[d] = true; auto = false; try { el.setPointerCapture(e.pointerId); } catch (_) {} });
+    for (const ev of ['pointerup', 'pointercancel', 'lostpointercapture']) el.addEventListener(ev, () => { keys[d] = false; });
+  }
   stage.focus({ preventScroll: true });
   document.getElementById('btn-full').addEventListener('click', () => {
     if (document.fullscreenElement) document.exitFullscreen?.().catch(() => {}); else stage.requestFullscreen?.().catch(() => {});
@@ -312,7 +337,7 @@
         audio = { ac, nb, master }; btn.setAttribute('aria-pressed', 'true');
       } else if (audio.ac.state === 'running') { audio.ac.suspend(); btn.setAttribute('aria-pressed', 'false'); }
       else { audio.ac.resume(); btn.setAttribute('aria-pressed', 'true'); }
-    } catch (err) { btn.disabled = true; btn.textContent = 'Sound unavailable'; }
+    } catch (err) { btn.disabled = true; btn.textContent = 'Son indisponible'; }
   });
   const live = () => audio && audio.ac.state === 'running';
   function sfxCharge() {
@@ -399,17 +424,34 @@
     if (paused || document.hidden) dt = 0;
     if (reduce.matches) dt *= 0.4;
     T += dt;
-    const c = ((T - cycle0) % P + P) % P;
-    const idle = c < T_RAISE || c >= T_BACK;
+    // cast clock: demo mode loops the spell; once the player takes over, E starts it
+    if (!casting && auto && T - idleSince >= T_RAISE) startCast();
+    let c = 0;
+    if (casting) { c = T_RAISE + (T - castStart); if (c >= P) { casting = false; idleSince = T; c = 0; prevC = 0; } }
+    const idle = !casting || c >= T_BACK;
+    // walking: locked from raising the staff until just after the shot
+    const locked = casting && c < T_FIRE + 0.25;
+    const mv = locked ? 0 : (keys.right ? 1 : 0) - (keys.left ? 1 : 0);
+    let walking = false;
+    if (mv && dt > 0) {
+      face = mv;
+      const nx = clamp(posX + mv * 30 * dt, -28, 91);
+      walking = nx !== posX; posX = nx;
+      if (walking) walkPh += dt * 9;
+    }
+    const ox = Math.round(posX);
+    const toWorld = x => face > 0 ? x + ox : ox + 87 - x;
+    const step = walking ? (Math.sin(walkPh) > 0 ? 1 : -1) : 0;
+    const bodyDy = walking ? (Math.sin(walkPh * 2) > 0 ? 1 : 0) : (idle && Math.sin(T * 2.2) > 0.35 ? 1 : 0);
     const p = pose(c);
-    if (idle) p.hy += Math.sin(T * 2.2) > 0.35 ? 1 : 0;
+    p.hy += bodyDy;
     if (c >= T_FIRE && c < T_FIRE + 0.1) p.hx -= 1;      // recoil
     // charge builds while the staff is raised, and drains fast after the shot
     if (c >= T_CHARGE && c < T_FIRE) charge = (c - T_CHARGE) / (T_FIRE - T_CHARGE);
     else charge = Math.max(0, charge - dt * 5);
     if (charge > 0.75 && !reduce.matches && Math.sin(T * 47) > 0.2) p.hy -= 1; // the staff trembles with power
-    if (prevC < T_CHARGE && c >= T_CHARGE) sfxCharge();
-    const fire = prevC < T_FIRE && c >= T_FIRE;
+    if (casting && prevC < T_CHARGE && c >= T_CHARGE) sfxCharge();
+    const fire = casting && prevC < T_FIRE && c >= T_FIRE;
     prevC = c;
 
     // ---- background ----
@@ -427,27 +469,39 @@
     // ---- rampart + wizard ----
     b = fgx; b.clearRect(0, 0, W, H + 4);
     b.drawImage(wall, 0, 0);
+    b = wzx; b.clearRect(0, 0, W, H + 4);
     const blink = (T % 4.3) < 0.13;
-    drawWizard(idle && Math.sin(T * 2.2) > 0.35 ? 1 : 0, blink);
+    drawWizard(bodyDy, blink, step);
     if (p.back > 0.35) {
       const k = clamp((p.back - 0.35) / 0.65, 0, 1);
       drawArm(38, 79, 38 - 7 * k, 79 + 1 - 2 * k);
     }
     const gemPulse = 0.35 + 0.25 * Math.sin(T * 3.1) + charge * 0.6;
-    const [gx, gy] = drawStaff(p.hx, p.hy, p.ang, gemPulse);
+    const [lgx, lgy] = drawStaff(p.hx, p.hy, p.ang, gemPulse);
     drawArm(50, 79, p.hx, p.hy);
-    if (fire) release(gx, gy);
-
     // blue rim light on the wizard while the crystal is charged
     const rimA = Math.max(charge, burst ? 1 - burst.t / 0.35 : 0);
     if (rimA > 0.02) for (const [x, y] of RIM) {
-      const a = rimA * clamp(1 - Math.hypot(x - gx, y - gy) / 48, 0, 1);
+      const a = rimA * clamp(1 - Math.hypot(x - lgx, y - lgy) / 48, 0, 1);
       if (a > 0.05) { b.globalAlpha = a * 0.9; pix(b, x, y, '#79b8ff'); }
     }
     b.globalAlpha = 1;
+    // place the wizard in the world, mirrored when facing left
+    fgx.save();
+    if (face > 0) fgx.drawImage(wizBuf, ox, 0); else { fgx.translate(ox + 88, 0); fgx.scale(-1, 1); fgx.drawImage(wizBuf, 0, 0); }
+    fgx.restore();
+    b = fgx;
+    const gx = toWorld(lgx), gy = lgy;
+    if (fire) release(gx, gy);
+    // a puff of dust at each footfall
+    if (walking && step !== lastStep) {
+      const fx0 = toWorld(WX + 4 - step * 2);
+      for (let i = 0; i < 3; i++) spark(fx0 + rand(-1, 1), WALL - 1, -face * rand(4, 12), -rand(2, 7), rand(0.3, 0.5), { c: i % 2 ? '#6b6986' : '#8a88a3', drag: 3, grav: 12 });
+    }
+    lastStep = step;
     // light spilling onto the cap stones
     const sources = [];
-    if (charge > 0) sources.push([gx, charge * 0.9, 12], [p.hx - 10, charge * 0.6, 10]);
+    if (charge > 0) sources.push([gx, charge * 0.9, 12], [toWorld(p.hx - 10), charge * 0.6, 10]);
     if (burst) sources.push([burst.x, Math.max(0, 1 - burst.t / 0.5), 18]);
     if (bolt) sources.push([bolt.x, 1, 9]);
     if (sources.length) for (let x = 0; x < W; x++) {
@@ -517,15 +571,15 @@
     }
     // the bolt: bright core with a broken, fading trail
     if (bolt) {
-      bolt.t += dt; bolt.x += 190 * dt;
+      bolt.t += dt; bolt.x += 190 * dt * bolt.dir;
       for (let i = 1; i < 26; i++) {
         if (hash(i, Math.floor(T * 24), 9) < 0.22 + i * 0.012) continue;
-        b.globalAlpha = 1 - i / 26; pix(b, bolt.x - i, bolt.y + (i > 12 && hash(i, 3, 1) < 0.2 ? 1 : 0), i < 6 ? '#bff0ff' : i < 14 ? '#6fb8ff' : '#6d5cf0');
+        b.globalAlpha = 1 - i / 26; pix(b, bolt.x - i * bolt.dir, bolt.y + (i > 12 && hash(i, 3, 1) < 0.2 ? 1 : 0), i < 6 ? '#bff0ff' : i < 14 ? '#6fb8ff' : '#6d5cf0');
       }
       b.globalAlpha = 1;
       rect(b, bolt.x - 1, bolt.y, 3, 1, '#9fe6ff'); rect(b, bolt.x, bolt.y - 1, 1, 3, '#9fe6ff'); pix(b, bolt.x, bolt.y, '#ffffff');
-      if (Math.random() < 0.7) spark(bolt.x - rand(0, 6), bolt.y + rand(-1, 1), rand(-25, 5), rand(-14, 14), rand(0.25, 0.6), { drag: 3 });
-      if (bolt.x > W + 30) bolt = null;
+      if (Math.random() < 0.7) spark(bolt.x - rand(0, 6) * bolt.dir, bolt.y + rand(-1, 1), rand(-25, 5) * bolt.dir, rand(-14, 14), rand(0.25, 0.6), { drag: 3 });
+      if (bolt.x > W + 30 || bolt.x < -30) bolt = null;
     }
     for (let i = fx.length - 1; i >= 0; i--) {
       const s = fx[i]; s.life += dt; if (s.life > s.max) { fx.splice(i, 1); continue; }
@@ -558,8 +612,8 @@
     const vg = vctx.createRadialGradient(VW / 2, VH * 0.55, VH * 0.35, VW / 2, VH * 0.55, VW * 0.7);
     vg.addColorStop(0, 'rgba(6,5,20,0)'); vg.addColorStop(1, 'rgba(6,5,20,0.45)');
     vctx.fillStyle = vg; vctx.fillRect(0, 0, VW, VH);
-    const ox = Math.random() * 160 | 0, oy = Math.random() * 160 | 0;
-    vctx.save(); vctx.translate(-ox, -oy); vctx.fillStyle = grainPat; vctx.fillRect(ox, oy, VW, VH); vctx.restore();
+    const gox = Math.random() * 160 | 0, goy = Math.random() * 160 | 0;
+    vctx.save(); vctx.translate(-gox, -goy); vctx.fillStyle = grainPat; vctx.fillRect(gox, goy, VW, VH); vctx.restore();
   }
   requestAnimationFrame(frame);
 })();
