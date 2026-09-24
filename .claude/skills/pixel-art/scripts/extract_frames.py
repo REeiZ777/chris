@@ -2,12 +2,15 @@
 """Turn a reference video or GIF into frames you can inspect.
 
 Usage: python3 extract_frames.py <video> <outdir> [--fps 2] [--crop W:H:X:Y] [--zoom 2]
+                                 [--region W:H:X:Y] [--region-fps 6]
 
 Produces in <outdir>:
   frames/NNN.jpg     frames at --fps, 400 px wide (for an overview)
   sheet.jpg          contact sheet of those frames (see what changes over time)
   crop_<t>.png       full-resolution crops at 3 moments, enlarged with nearest-neighbour
                      (read individual pixels; pass --crop to frame the scene)
+  region_NN.jpg      with --region: 5x5 sheets of one area sampled at --region-fps
+                     (read a character's animation pose by pose)
 Prints duration and resolution. Uses ffmpeg from PATH, else installs imageio-ffmpeg.
 """
 import argparse, glob, math, os, re, shutil, subprocess, sys
@@ -31,6 +34,8 @@ def main():
     ap.add_argument("--fps", type=float, default=2)
     ap.add_argument("--crop", help="W:H:X:Y region of the source containing the scene")
     ap.add_argument("--zoom", type=int, default=2, help="nearest-neighbour enlargement of crops")
+    ap.add_argument("--region", help="W:H:X:Y area to sample densely (e.g. an animated character)")
+    ap.add_argument("--region-fps", type=float, default=6)
     a = ap.parse_args()
     ff = find_ffmpeg()
     os.makedirs(os.path.join(a.outdir, "frames"), exist_ok=True)
@@ -54,6 +59,16 @@ def main():
     for t in ([seconds * 0.1, seconds * 0.5, seconds * 0.85] if seconds else [0]):
         subprocess.run([ff, *q, "-ss", f"{t:.2f}", "-i", a.video, "-frames:v", "1", "-vf", vf,
                         os.path.join(a.outdir, f"crop_{t:05.2f}.png")], check=True)
+    if a.region:
+        rdir = os.path.join(a.outdir, "region"); os.makedirs(rdir, exist_ok=True)
+        subprocess.run([ff, *q, "-i", a.video, "-vf", f"fps={a.region_fps},crop={a.region}",
+                        os.path.join(rdir, "%03d.png")], check=True)
+        rn = len(glob.glob(os.path.join(rdir, "*.png")))
+        for k in range(0, rn, 25):
+            subprocess.run([ff, *q, "-start_number", str(k + 1), "-i", os.path.join(rdir, "%03d.png"),
+                            "-vf", "scale=250:-1,tile=5x5", "-frames:v", "1",
+                            os.path.join(a.outdir, f"region_{k // 25:02d}.jpg")], check=True)
+        print(f"{rn} region frames at {a.region_fps} fps -> region_NN.jpg (read left-to-right, top-to-bottom)")
     print(f"{n} frames, sheet.jpg and crops written to {a.outdir}")
 
 

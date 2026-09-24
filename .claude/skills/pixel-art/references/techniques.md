@@ -13,6 +13,7 @@ search it by the function names given.
 7. Screen pass (glow, light pools, bloom, fog, moonbeams, bokeh, vignette, grain)
 8. Sound
 9. Performance notes
+10. Characters and spell effects
 
 ---
 
@@ -154,3 +155,40 @@ gain; thunder = the noise through a 140 Hz lowpass with a 0.25 s attack and 3 s 
 - Pre-render anything that doesn't move. Keep particle arrays bounded (lifetimes).
 - Cap `dt` at 0.05 s and set it to 0 when paused or `document.hidden`.
 - Canvas backing size = CSS size × min(2, devicePixelRatio); scale `S = canvas.width / W`.
+
+## 10. Characters and spell effects
+
+Implemented in `assets/example-wizard.html` (search `drawWizard`, `drawArm`, `drawStaff`,
+`pose`, `release`).
+
+- **Body sprite**: ~22×34 string array, facing the action. Materials: robe (base, shade,
+  highlight), trim bands in orange, skin (2 values), beard/hair (2 values + grey dots), outline
+  `#2a0f1e`. A hat or hood with a curled tip, a trim band and a small emblem gives character.
+- **Breathing**: when idle, draw rows 0–20 one row lower and skip row 21, so the upper body sinks
+  1 px without leaving a gap. **Blink**: swap the eye colour for skin for ~0.13 s every ~4 s.
+- **Limbs and held items**: `drawArm(shoulder, hand)` stamps 4×4 outline squares then 2×2 cloth
+  along the segment, a highlight every other step, and a 2×2 hand at the end.
+  `drawStaff(hand, angle)` extends 24 px ahead and 13 px behind the hand: 3×3 dark stamps, then
+  a 1 px wood core with a lighter grain pixel every few steps, fork prongs on the perpendicular,
+  and a cross-shaped gem that brightens (and grows arms) with the charge.
+- **Keyframes**: `[t, handX, handY, angleDeg, backArm]`, e.g. idle (-90°) → raise (−80°, hand 13 px
+  higher, 0.3 s) → hold while charging (1.4 s) → swing forward (−12°, 0.18 s) → hold 0.7 s →
+  return 0.45 s. Add tremble when charge > 0.75 (hand ±1 px) and a 1 px recoil for 0.1 s on release.
+- **Charge**: spawn 26→66 sparks/s on flattened orbits (`y = r·sin(a)·0.55`) around the gem, each
+  with its own angular speed (some reversed), radius shrinking faster as charge grows; fast ones
+  draw as a line from their previous position (motion dash). When one reaches the centre, flash a
+  white pixel. Behind them, a rotating dotted purple ellipse (the vortex) grows with the charge.
+- **Release**: (1) a sparkle sphere at the tip for 0.3 s: dotted circle growing `3 + 10·√k`, plus
+  random interior pixels re-rolled each frame; (2) a sparse dotted shockwave ring growing to ~100 px
+  over 0.9 s with ease-out, fading; (3) ~45 debris sparks with drag and slight gravity, some drawn
+  as dashes; (4) leftover orbit sparks thrown outward; (5) a short screen tint (skip under reduced
+  motion); (6) the sound: bandpassed noise burst + sine sweep 1300→90 Hz.
+- **Bolt**: travels ~190 px/s; draw a 3×3 plus-shaped core with a white centre and a 25 px trail
+  whose pixels drop out by `hash(i, floor(T·24))` more often further back, colours white → cyan →
+  blue → violet; shed small sparks behind it.
+- **Palette for magic**: `#ffffff`, `#c8f4ff`, `#7fd8ff`, `#5aa2ff`, `#7f6bff`, `#a58cff`. Blue-violet
+  magic reads best against a warm red/orange character and a violet night sky.
+- **Sky with visible bands** (common in pixel-art references): 4 flat band colours with a 3-row
+  Bayer ramp (25/50/75 %) above each edge, rather than a smooth dithered gradient.
+- **Moon under bloom**: multiply the bright-pass by ~0.12 inside the moon disc and keep its own
+  glow ≤ 0.08, otherwise the craters vanish.
