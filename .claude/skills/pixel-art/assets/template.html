@@ -1,0 +1,302 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>SCENE NAME</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Pixelify+Sans:wght@500;700&family=JetBrains+Mono:wght@400;600&display=swap">
+<style>
+  /* Starter engine for animated pixel-art scenes. Replace the SCENE sections; keep the pipeline. */
+  :root { color-scheme: dark; --ground: #06060e; --panel: #0e0f24; --ink: #dadcf2; --muted: #8385ab; --line: #24254a; --accent: #ffb357; }
+  html, body { height: 100%; }
+  body {
+    margin: 0; box-sizing: border-box; background: var(--ground); color: var(--ink);
+    font: 13px/1.5 "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    padding-inline: 16px; padding-block: 16px;
+    display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 14px;
+  }
+  .stage, .bar { width: min(100%, max(300px, calc((100vh - 130px) * 16 / 9))); max-width: 100%; }
+  .stage {
+    position: relative; aspect-ratio: 16 / 9; display: grid; place-items: center;
+    background: #0b0c24; border-radius: 6px; overflow: hidden;
+    box-shadow: 0 0 0 1px var(--line), 0 40px 90px -30px rgba(60, 50, 160, .55);
+  }
+  .stage:fullscreen { width: 100%; height: 100%; aspect-ratio: auto; border-radius: 0; background: #000; box-shadow: none; }
+  canvas { display: block; image-rendering: pixelated; image-rendering: crisp-edges; }
+  .bar { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px 20px; }
+  .name { display: flex; flex-direction: column; gap: 2px; }
+  h1 { margin: 0; font: 700 18px/1.1 "Pixelify Sans", "JetBrains Mono", ui-monospace, monospace; letter-spacing: .02em; }
+  .meta { color: var(--muted); font-size: 11px; letter-spacing: .06em; text-transform: uppercase; font-variant-numeric: tabular-nums; }
+  .controls { display: flex; flex-wrap: wrap; gap: 8px; }
+  button { font: 600 12px/1 "JetBrains Mono", ui-monospace, monospace; color: var(--ink); background: var(--panel); border: 1px solid var(--line); border-radius: 4px; padding: 8px 11px; cursor: pointer; }
+  button:hover { border-color: #4a4b86; }
+  button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  button[aria-pressed="true"] { border-color: var(--accent); color: var(--accent); }
+</style>
+</head>
+<body>
+<div class="stage" id="stage">
+  <canvas id="view" aria-label="DESCRIBE THE SCENE"></canvas>
+</div>
+<div class="bar">
+  <div class="name">
+    <h1>SCENE NAME</h1>
+    <span class="meta">320 × 180 px · rendu en temps réel</span>
+  </div>
+  <div class="controls">
+    <button type="button" id="btn-pause" aria-pressed="false">Pause</button>
+    <button type="button" id="btn-rain">Pluie : forte</button>
+    <button type="button" id="btn-full">Plein écran</button>
+  </div>
+</div>
+<script>
+(() => {
+  'use strict';
+  const W = 320, H = 180;                       // internal pixel grid
+  const stage = document.getElementById('stage');
+  const view = document.getElementById('view');
+  const vctx = view.getContext('2d');
+
+  // ---------- helpers ----------
+  function mk(w = W, h = H) { const c = document.createElement('canvas'); c.width = w; c.height = h; return c; }
+  function rect(g, x, y, w, h, c) { g.fillStyle = c; g.fillRect(Math.round(x), Math.round(y), w, h); }
+  function pix(g, x, y, c) { g.fillStyle = c; g.fillRect(Math.round(x), Math.round(y), 1, 1); }
+  function line(g, x0, y0, x1, y1, c, step = 1) {
+    x0 = Math.round(x0); y0 = Math.round(y0); x1 = Math.round(x1); y1 = Math.round(y1);
+    const dx = Math.abs(x1 - x0), dy = -Math.abs(y1 - y0), sx = x0 < x1 ? 1 : -1, sy = y0 < y1 ? 1 : -1;
+    let err = dx + dy, i = 0; g.fillStyle = c;
+    for (;;) {
+      if (i++ % step === 0) g.fillRect(x0, y0, 1, 1);
+      if (x0 === x1 && y0 === y1) break;
+      const e2 = 2 * err; if (e2 >= dy) { err += dy; x0 += sx; } if (e2 <= dx) { err += dx; y0 += sy; }
+    }
+  }
+  function sprite(g, x, y, rows, pal) {
+    for (let j = 0; j < rows.length; j++) for (let i = 0; i < rows[j].length; i++) { const c = pal[rows[j][i]]; if (c) pix(g, x + i, y + j, c); }
+  }
+  function hash(x, y, s = 0) {
+    let h = Math.imul(x | 0, 374761393) + Math.imul(y | 0, 668265263) + Math.imul(s | 0, 1440662683);
+    h = Math.imul(h ^ (h >>> 13), 1274126177); h ^= h >>> 16; return (h >>> 0) / 4294967296;
+  }
+  function rng(seed) {
+    return () => { seed = (seed + 0x6D2B79F5) | 0; let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t; return ((t ^ (t >>> 14)) >>> 0) / 4294967296; };
+  }
+  const BAYER = [0, 8, 2, 10, 12, 4, 14, 6, 3, 11, 1, 9, 15, 7, 13, 5].map(v => v / 16 - 0.5);
+  const bay = (x, y) => BAYER[((y & 3) << 2) | (x & 3)];
+  const hex = h => [parseInt(h.slice(1, 3), 16), parseInt(h.slice(3, 5), 16), parseInt(h.slice(5, 7), 16)];
+  const mix = (a, c, t) => [a[0] + (c[0] - a[0]) * t, a[1] + (c[1] - a[1]) * t, a[2] + (c[2] - a[2]) * t];
+  const css = (c, a = 1) => `rgba(${c[0] | 0},${c[1] | 0},${c[2] | 0},${a})`;
+  const clamp = (v, a, z) => Math.max(a, Math.min(z, v));
+  const rand = (a, z) => a + Math.random() * (z - a);
+
+  // ---------- layers: background, foreground (may be offset), near ----------
+  const bgBuf = mk(), bgx = bgBuf.getContext('2d');
+  const fgBuf = mk(W, H + 4), fgx = fgBuf.getContext('2d');
+  const nrBuf = mk(), nrx = nrBuf.getContext('2d');
+  let b = bgx;                                  // current layer for the draw helpers
+
+  // ---------- SCENE: static layers (render once) ----------
+  const GROUND = 150;
+  const sky = mk();
+  {
+    const g = sky.getContext('2d'), img = g.createImageData(W, H), d = img.data;
+    const stops = [[0, hex('#0a0b22')], [0.5, hex('#1a1a48')], [1, hex('#2c2863')]];
+    for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+      const t = clamp(y / H + bay(x, y) * 0.05, 0, 1), k = t < stops[1][0] ? 0 : 1;
+      const c = mix(stops[k][1], stops[k + 1][1], (t - stops[k][0]) / (stops[k + 1][0] - stops[k][0]));
+      const i = (y * W + x) * 4; d[i] = Math.round(c[0] / 3) * 3; d[i + 1] = Math.round(c[1] / 3) * 3; d[i + 2] = Math.round(c[2] / 3) * 3; d[i + 3] = 255;
+    }
+    g.putImageData(img, 0, 0);
+    for (let x = 0; x < W; x++) {
+      const yf = Math.round(128 + 6 * Math.sin(x * 0.02 + 1) + 3 * Math.sin(x * 0.07));
+      rect(g, x, yf, 1, H - yf, '#1c1a3e'); pix(g, x, yf, '#28265a');
+    }
+  }
+  const scene = mk();                          // ground + lamp post, drawn into the foreground
+  {
+    const g = scene.getContext('2d');
+    for (let y = GROUND; y < H; y++) for (let x = 0; x < W; x++) {
+      let c = mix(hex('#3f3246'), hex('#1e1828'), (y - GROUND) / (H - GROUND));
+      const k = 1 + (hash(x, y, 1) - 0.5 + bay(x, y) * 0.35) * 0.2; c = c.map(v => Math.round(v * k / 4) * 4);
+      if (y === GROUND) c = hash(x, 0, 3) < 0.3 ? hex('#3f8151') : hex('#2f6444');
+      pix(g, x, y, css(c));
+    }
+    for (let x = 0; x < W; x++) if (hash(x, 1, 8) < 0.35) pix(g, x, GROUND - 1, '#3b7a48');
+    rect(g, 159, 112, 2, 38, '#1b1823'); rect(g, 157, 147, 6, 3, '#1b1823');
+    rect(g, 157, 105, 6, 1, '#1b1823'); rect(g, 157, 106, 1, 5, '#1b1823'); rect(g, 162, 106, 1, 5, '#1b1823'); rect(g, 157, 111, 6, 1, '#1b1823');
+  }
+  const surfaceAt = x => GROUND;                // where near rain lands; return null to fall through
+
+  // ---------- SCENE: dynamic state ----------
+  const R0 = rng(7);
+  const stars = Array.from({ length: 120 }, () => ({ x: R0() * W | 0, y: R0() * 120 | 0, b: 0.25 + R0() * 0.75, sp: 0.6 + R0() * 3, ph: R0() * 6.28 }));
+  const drops = [], splashes = [], MAXD = 260;
+  function resetDrop(d, init) {
+    d.z = Math.random(); d.near = d.z > 0.42; d.x = Math.random() * W | 0;
+    d.y = init ? Math.random() * H : -Math.random() * 60 - 6;
+    d.v = 150 + d.z * 150; d.len = 2 + Math.round(d.z * 4); d.a = 0.16 + d.z * 0.42;
+    const s = d.near ? surfaceAt(d.x) : null; d.stop = s == null ? H + 8 : s;
+  }
+  for (let i = 0; i < MAXD; i++) { const d = {}; resetDrop(d, true); drops.push(d); }
+  const LIGHTS = [[160, 108, 30, 0.9]];         // [x, y, radius, strength] — tints nearby rain
+  const RAIN_COLS = Array.from({ length: 9 }, (_, i) => css(mix([170, 182, 234], [255, 200, 125], i / 8)));
+  function drawRain(dt, nearPass) {
+    const n = Math.round(MAXD * rainLevel);
+    for (let i = 0; i < n; i++) {
+      const d = drops[i]; if (d.near !== nearPass) continue;
+      d.y += d.v * dt;
+      if (d.y + d.len >= d.stop) {
+        if (d.stop < H) for (let k = 0; k < 2; k++) splashes.push({ x: d.x, y: d.stop - 1, vx: rand(-18, 18), vy: rand(-40, -18), life: 0 });
+        resetDrop(d, false); continue;
+      }
+      let w = 0;
+      if (nearPass) for (const L of LIGHTS) { const k = (1 - Math.hypot(d.x - L[0], d.y - L[1]) / L[2]) * L[3]; if (k > w) w = k; }
+      b.globalAlpha = Math.min(1, d.a + w * 0.5); rect(b, d.x, d.y, 1, d.len, RAIN_COLS[Math.round(clamp(w, 0, 1) * 8)]);
+    }
+    b.globalAlpha = 1;
+    if (nearPass) for (let i = splashes.length - 1; i >= 0; i--) {
+      const s = splashes[i]; s.life += dt; if (s.life > 0.28) { splashes.splice(i, 1); continue; }
+      s.vy += 260 * dt; s.x += s.vx * dt; s.y += s.vy * dt;
+      b.globalAlpha = 0.7 * (1 - s.life / 0.28); pix(b, s.x, s.y, '#c8d2ff'); b.globalAlpha = 1;
+    }
+  }
+
+  // ---------- controls ----------
+  let paused = false, rainLevel = 1;
+  const rainSteps = [[1, 'forte'], [0.45, 'légère'], [0, 'arrêtée']]; let rainIdx = 0;
+  const reduce = window.matchMedia('(prefers-reduced-motion: reduce)');
+  document.getElementById('btn-pause').addEventListener('click', e => {
+    paused = !paused; e.currentTarget.setAttribute('aria-pressed', String(paused)); e.currentTarget.textContent = paused ? 'Lecture' : 'Pause';
+  });
+  document.getElementById('btn-rain').addEventListener('click', e => {
+    rainIdx = (rainIdx + 1) % rainSteps.length; rainLevel = rainSteps[rainIdx][0]; e.currentTarget.textContent = 'Pluie : ' + rainSteps[rainIdx][1];
+  });
+  document.getElementById('btn-full').addEventListener('click', () => {
+    if (document.fullscreenElement) document.exitFullscreen?.().catch(() => {}); else stage.requestFullscreen?.().catch(() => {});
+  });
+
+  // ---------- sizing ----------
+  let S = 1;
+  function resize() {
+    const r = stage.getBoundingClientRect(); let w = r.width, h = w * H / W;
+    if (h > r.height) { h = r.height; w = h * W / H; }
+    const dpr = Math.min(2, window.devicePixelRatio || 1);
+    view.style.width = w + 'px'; view.style.height = h + 'px';
+    view.width = Math.max(1, Math.round(w * dpr)); view.height = Math.max(1, Math.round(h * dpr)); S = view.width / W;
+  }
+  new ResizeObserver(resize).observe(stage); resize();
+
+  // ---------- screen pass: glow, pools, bloom, fog, grain ----------
+  let gOff = 0;
+  function glow(x, y, r, c, a) {
+    if (a <= 0.003) return;
+    const X = x * S, Y = (y + gOff) * S, Rr = r * S, gr = vctx.createRadialGradient(X, Y, 0, X, Y, Rr);
+    gr.addColorStop(0, `rgba(${c},${a})`); gr.addColorStop(0.35, `rgba(${c},${a * 0.38})`); gr.addColorStop(1, `rgba(${c},0)`);
+    vctx.fillStyle = gr; vctx.fillRect(X - Rr, Y - Rr, Rr * 2, Rr * 2);
+  }
+  function pool(x, y, rx, ry, c, a) {
+    vctx.save(); vctx.translate(x * S, (y + gOff) * S); vctx.scale(1, ry / rx);
+    const R = rx * S, gr = vctx.createRadialGradient(0, 0, 0, 0, 0, R);
+    gr.addColorStop(0, `rgba(${c},${a})`); gr.addColorStop(1, `rgba(${c},0)`);
+    vctx.fillStyle = gr; vctx.fillRect(-R, -R, 2 * R, 2 * R); vctx.restore();
+  }
+  function makeFog(seed, w, h, n, col) {
+    const c = mk(w, h), g = c.getContext('2d'), R = rng(seed);
+    for (let i = 0; i < n; i++) {
+      const x = R() * w, y = h * (0.35 + R() * 0.4), r = h * (0.18 + R() * 0.3), a = 0.05 + R() * 0.09;
+      for (const ox of [-w, 0, w]) {
+        const gr = g.createRadialGradient(x + ox, y, 0, x + ox, y, r);
+        gr.addColorStop(0, `rgba(${col},${a})`); gr.addColorStop(1, `rgba(${col},0)`);
+        g.fillStyle = gr; g.fillRect(x + ox - r, y - r, 2 * r, 2 * r);
+      }
+    }
+    return c;
+  }
+  const fogBack = makeFog(3, 512, 80, 40, '118,126,205');
+  function drawFog(tex, y, h, w, speed, alpha, t) {
+    const off = (t * speed) % w; vctx.globalAlpha = alpha; vctx.imageSmoothingEnabled = true;
+    for (const x of [-off, w - off]) vctx.drawImage(tex, x * S, y * S, w * S, h * S);
+    vctx.globalAlpha = 1;
+  }
+  const bw = W / 2 | 0, bh = H / 2 | 0;
+  const bl0 = mk(bw, bh), bl0x = bl0.getContext('2d');
+  const bl1 = mk(bw / 2 | 0, bh / 2 | 0), bl1x = bl1.getContext('2d', { willReadFrequently: true });
+  const bl2 = mk(bw / 4 | 0, bh / 4 | 0), bl2x = bl2.getContext('2d');
+  const bl3 = mk(bw / 8 | 0, bh / 8 | 0), bl3x = bl3.getContext('2d');
+  function bloom(off) {
+    bl0x.drawImage(bgBuf, 0, 0, bw, bh); bl0x.drawImage(fgBuf, 0, off / 2, bw, (H + 4) / 2);
+    bl1x.drawImage(bl0, 0, 0, bl1.width, bl1.height);
+    const im = bl1x.getImageData(0, 0, bl1.width, bl1.height), d = im.data;
+    for (let i = 0; i < d.length; i += 4) {
+      const k = clamp((0.3 * d[i] + 0.59 * d[i + 1] + 0.11 * d[i + 2] - 100) / 130, 0, 1) ** 1.3;
+      d[i] *= k; d[i + 1] *= k; d[i + 2] *= k; d[i + 3] = 255;
+    }
+    bl1x.putImageData(im, 0, 0);
+    bl2x.drawImage(bl1, 0, 0, bl2.width, bl2.height); bl3x.drawImage(bl2, 0, 0, bl3.width, bl3.height);
+    vctx.globalCompositeOperation = 'lighter'; vctx.imageSmoothingEnabled = true; vctx.imageSmoothingQuality = 'high';
+    [[bl1, 0.3], [bl2, 0.38], [bl3, 0.42]].forEach(([c, a]) => { vctx.globalAlpha = a; vctx.drawImage(c, 0, 0, view.width, view.height); });
+    vctx.globalAlpha = 1;
+  }
+  const grain = mk(192, 192);
+  {
+    const g = grain.getContext('2d'), im = g.createImageData(192, 192), d = im.data;
+    for (let i = 0; i < d.length; i += 4) { const on = Math.random() < 0.5 ? 0 : 255; d[i] = d[i + 1] = d[i + 2] = on; d[i + 3] = Math.random() * (on ? 12 : 20); }
+    g.putImageData(im, 0, 0);
+  }
+  const grainPat = vctx.createPattern(grain, 'repeat');
+
+  // ---------- main loop ----------
+  let last = performance.now(), T = 0;
+  function frame(now) {
+    requestAnimationFrame(frame);
+    let dt = Math.min(0.05, (now - last) / 1000); last = now;
+    if (paused || document.hidden) dt = 0;
+    if (reduce.matches) dt *= 0.4;
+    T += dt; const t = T;
+    const off = 0;                              // sub-pixel offset of the foreground (e.g. a bobbing island)
+
+    // SCENE: background layer
+    b = bgx; b.drawImage(sky, 0, 0);
+    for (const s of stars) { b.globalAlpha = s.b * (0.5 + 0.5 * Math.sin(t * s.sp + s.ph)); pix(b, s.x, s.y, '#dfe6ff'); }
+    b.globalAlpha = 1;
+    drawRain(dt, false);
+
+    // SCENE: foreground layer
+    b = fgx; b.clearRect(0, 0, W, H + 4);
+    b.drawImage(scene, 0, 0);
+    const lampOn = (t % 11 > 7.2 && t % 11 < 7.5 && Math.sin(t * 60) > 0) ? 0.25 : 1;
+    rect(b, 158, 106, 4, 5, lampOn > 0.5 ? '#ffe39a' : '#8a7a58');
+
+    // near layer
+    b = nrx; b.clearRect(0, 0, W, H);
+    drawRain(dt, true);
+
+    // compose
+    const VW = view.width, VH = view.height;
+    vctx.globalCompositeOperation = 'source-over'; vctx.imageSmoothingEnabled = false;
+    vctx.drawImage(bgBuf, 0, 0, VW, VH);
+    drawFog(fogBack, 112, 60, 480, 2.6, 1, t);
+    vctx.imageSmoothingEnabled = false;
+    vctx.drawImage(fgBuf, 0, off * S, VW, (H + 4) * S);
+    vctx.drawImage(nrBuf, 0, 0, VW, VH);
+    vctx.globalCompositeOperation = 'lighter';
+    gOff = off;
+    glow(160, 108, 26, '255,205,130', 0.42 * lampOn); glow(160, 108, 7, '255,235,180', 0.5 * lampOn);
+    pool(160, GROUND, 22, 4, '255,205,130', 0.22 * lampOn);
+    gOff = 0;
+    bloom(off);
+    vctx.globalCompositeOperation = 'source-over';
+    const vg = vctx.createRadialGradient(VW / 2, VH * 0.55, VH * 0.3, VW / 2, VH * 0.55, VW * 0.65);
+    vg.addColorStop(0, 'rgba(4,4,14,0)'); vg.addColorStop(1, 'rgba(4,4,14,0.55)');
+    vctx.fillStyle = vg; vctx.fillRect(0, 0, VW, VH);
+    const ox = Math.random() * 192 | 0, oy = Math.random() * 192 | 0;
+    vctx.save(); vctx.translate(-ox, -oy); vctx.fillStyle = grainPat; vctx.fillRect(ox, oy, VW, VH); vctx.restore();
+  }
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
