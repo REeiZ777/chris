@@ -102,7 +102,11 @@
   const stage = document.getElementById('stage');
   const view = document.getElementById('view');
   const vctx = view.getContext('2d');
-  const buf = mk(); const b = buf.getContext('2d');
+  // three low-res layers: background, floating island, near rain
+  const bgBuf = mk(), bgx = bgBuf.getContext('2d');
+  const fgBuf = mk(W, H + 4), fgx = fgBuf.getContext('2d');
+  const nrBuf = mk(), nrx = nrBuf.getContext('2d');
+  let b = bgx;
 
   // ---------- helpers ----------
   function mk(w = W, h = H) { const c = document.createElement('canvas'); c.width = w; c.height = h; return c; }
@@ -207,7 +211,7 @@
   }
 
   // ---------- static: clouds ----------
-  function makeCloud(seed, w, h) {
+  function makeCloud(seed, w, h, lit) {
     const R = rng(seed); const c = mk(w, h); const g = c.getContext('2d');
     const bumps = []; const n = 3 + (R() * 3 | 0);
     for (let i = 0; i < n; i++) bumps.push([w * (0.14 + 0.72 * R()), h - 4, h * (0.32 + 0.42 * R())]);
@@ -219,22 +223,23 @@
     };
     for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
       if (!inside(x, y)) continue;
-      let col = '#2c2b61';
-      if (!inside(x, y - 1)) col = '#3d3c7a';
-      else if (!inside(x, y - 2) && bay(x, y) > 0) col = '#35346e';
-      else if (!inside(x, y + 1)) col = '#1f1e4b';
-      else if (y > h * 0.62 && bay(x, y) > -0.1) col = '#252457';
+      const P = lit ? ['#3b3b7a', '#a4a8e0', '#6a6cb2', '#26265a', '#30306c'] : ['#2c2b61', '#3d3c7a', '#35346e', '#1f1e4b', '#252457'];
+      let col = P[0];
+      if (!inside(x, y - 1)) col = P[1];
+      else if (!inside(x, y - 2) && bay(x, y) > 0) col = P[2];
+      else if (!inside(x, y + 1)) col = P[3];
+      else if (y > h * 0.62 && bay(x, y) > -0.1) col = P[4];
       pix(g, x, y, col);
     }
     return c;
   }
   const clouds = [
-    { c: makeCloud(11, 58, 13), x: 0, y: 28, v: 1.3 },
-    { c: makeCloud(23, 86, 15), x: 64, y: 20, v: 2.1 },
-    { c: makeCloud(37, 102, 14), x: 98, y: 48, v: 1.1 },
-    { c: makeCloud(41, 64, 13), x: 232, y: 30, v: 1.7 },
-    { c: makeCloud(53, 112, 15), x: 250, y: 40, v: 1.4 },
-    { c: makeCloud(67, 74, 12), x: 380, y: 60, v: 0.9 },
+    { c: makeCloud(11, 58, 13), l: makeCloud(11, 58, 13, true), x: 0, y: 28, v: 1.3 },
+    { c: makeCloud(23, 86, 15), l: makeCloud(23, 86, 15, true), x: 64, y: 20, v: 2.1 },
+    { c: makeCloud(37, 102, 14), l: makeCloud(37, 102, 14, true), x: 98, y: 48, v: 1.1 },
+    { c: makeCloud(41, 64, 13), l: makeCloud(41, 64, 13, true), x: 232, y: 30, v: 1.7 },
+    { c: makeCloud(53, 112, 15), l: makeCloud(53, 112, 15, true), x: 250, y: 40, v: 1.4 },
+    { c: makeCloud(67, 74, 12), l: makeCloud(67, 74, 12, true), x: 380, y: 60, v: 0.9 },
   ];
 
   // ---------- static: island + house + props ----------
@@ -474,7 +479,7 @@
             s.connect(bp).connect(gg).connect(master); s.start(t0, Math.random(), 0.1);
           }
         };
-        audio = { ac, rain, timer: setInterval(crackle, 70) };
+        audio = { ac, rain, master, nb, timer: setInterval(crackle, 70) };
         btn.setAttribute('aria-pressed', 'true');
       } else if (audio.ac.state === 'running') { audio.ac.suspend(); btn.setAttribute('aria-pressed', 'false'); }
       else { audio.ac.resume(); btn.setAttribute('aria-pressed', 'true'); }
@@ -545,7 +550,7 @@
   }
 
   function drawWaterfall(t) {
-    for (let y = POND.y + 1; y < H; y++) {
+    for (let y = POND.y + 1; y < H + 4; y++) {
       const k = (y - POND.y) / (H - POND.y);
       const w = 2 + (k > 0.25 ? 1 : 0);
       for (let i = 0; i < w; i++) {
@@ -685,19 +690,31 @@
     }
   }
 
-  function drawRain(dt, nearPass) {
+  // ---------- rain (near drops pick up colour from nearby lights) ----------
+  const LIGHTS = [[262, 128, 44, 1], [158.5, 89, 30, 0.85], [185.5, 101, 17, 0.55], [232.5, 101, 17, 0.55], [212, 123, 20, 0.65],
+    [253, 96, 13, 0.55], [317, 103, 13, 0.55], [335, 102, 13, 0.55], [118, 125, 11, 0.5]];
+  const RAIN_COLS = Array.from({ length: 9 }, (_, i) => css(mix([170, 182, 234], [255, 200, 125], i / 8)));
+  function drawRain(dt, nearPass, bobR) {
     const n = Math.round(MAXD * rainLevel);
     for (let i = 0; i < n; i++) {
       const d = drops[i]; if (d.near !== nearPass) continue;
       d.y += d.v * dt;
-      if (d.y + d.len >= d.stop) {
+      const stop = d.stop < H ? d.stop + bobR : d.stop;
+      if (d.y + d.len >= stop) {
         if (d.stop < H) {
           if (d.x >= POND.x && d.x < POND.x + POND.w && d.stop === POND.y) { if (Math.random() < 0.5) ripples.push({ x: d.x, t: 0 }); }
-          else for (let k = 0; k < 2; k++) splashes.push({ x: d.x, y: d.stop - 1, vx: rand(-18, 18), vy: rand(-40, -18), life: 0 });
+          else for (let k = 0; k < 2; k++) splashes.push({ x: d.x, y: stop - 1, vx: rand(-18, 18), vy: rand(-40, -18), life: 0 });
         }
         resetDrop(d, false); continue;
       }
-      b.globalAlpha = d.a; rect(b, d.x, d.y, 1, d.len, '#aab6ea');
+      let w = 0;
+      if (nearPass) for (const L of LIGHTS) {
+        const dx = d.x - L[0], dy = d.y + d.len / 2 - L[1] - bobR, r = L[2];
+        if (dx > r || dx < -r || dy > r || dy < -r) continue;
+        const k = (1 - Math.hypot(dx, dy) / r) * L[3]; if (k > w) w = k;
+      }
+      b.globalAlpha = Math.min(1, d.a + w * 0.5 + flash * 0.25);
+      rect(b, d.x, d.y, 1, d.len, RAIN_COLS[Math.round(clamp(w, 0, 1) * 8)]);
     }
     b.globalAlpha = 1;
     // hidden drops still recycle so turning rain back on feels natural
@@ -709,13 +726,167 @@
     }
   }
 
+  function updateFireflies(t) {
+    for (const f of fireflies) {
+      f.x = f.bx + Math.sin(t * f.a + f.ph) * 9 + Math.sin(t * 1.7 * f.a + f.ph * 2) * 3;
+      f.y = f.by + Math.sin(t * f.bq + f.ph * 1.3) * 5;
+      f.k = Math.max(0, Math.sin(t * f.bl + f.ph)) ** 0.6;
+    }
+  }
+
+  // warm streak under the boat lantern, fireflies mirrored in the pond
+  function drawReflections(t, lamp) {
+    for (let y = POND.y + 2; y < POND.y + 12; y++) {
+      const k = (y - POND.y) / 12;
+      if (hash(y, Math.floor(t * 8), 17) < 0.2 + k * 0.45) continue;
+      const off = Math.round(Math.sin(y * 1.7 + t * 4) * (0.6 + k * 1.6));
+      b.globalAlpha = 0.8 * (1 - k); pix(b, lamp[0] + off, y, y % 2 ? '#ffd27a' : '#ffae48');
+      if (k < 0.4) { b.globalAlpha *= 0.5; pix(b, lamp[0] + off + 1, y, '#ffcf7a'); }
+    }
+    for (const f of fireflies) {
+      if (f.k < 0.2 || f.x < POND.x || f.x >= POND.x + POND.w) continue;
+      const ry = POND.y + 1 + (POND.y - f.y) * 0.45;
+      if (ry >= POND.y + POND.h) continue;
+      b.globalAlpha = 0.5 * f.k; pix(b, f.x + Math.round(Math.sin(t * 5 + ry) * 0.6), ry, '#9ff6ff');
+    }
+    b.globalAlpha = 1;
+  }
+
+  // ---------- distant lightning (off when reduced motion is requested) ----------
+  let flash = 0, flashT = -1, bolt = null, nextFlash = rand(8, 16);
+  function makeBolt() {
+    const pts = []; let x = Math.random() < 0.5 ? rand(12, 55) : rand(335, 372), y = rand(44, 56);
+    pts.push([x, y]); while (y < 160) { y += rand(3, 7); x += rand(-4.5, 4.5); pts.push([x, y]); }
+    const m = pts[2 + (Math.random() * 3 | 0)], br = [[m[0], m[1]]]; let bx = m[0], by = m[1]; const dir = Math.random() < 0.5 ? -1 : 1;
+    for (let i = 0; i < 4; i++) { bx += dir * rand(2, 5); by += rand(2, 5); br.push([bx, by]); }
+    return { pts, br };
+  }
+  function thunder() {
+    if (!audio || audio.ac.state !== 'running') return;
+    setTimeout(() => {
+      const { ac, nb, master } = audio; const s = ac.createBufferSource(); s.buffer = nb; s.loop = true;
+      const lp = ac.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 140;
+      const g = ac.createGain(); const t0 = ac.currentTime;
+      g.gain.setValueAtTime(0.0001, t0); g.gain.exponentialRampToValueAtTime(0.9, t0 + 0.25); g.gain.exponentialRampToValueAtTime(0.001, t0 + 3.5);
+      s.connect(lp).connect(g).connect(master); s.start(t0); s.stop(t0 + 3.6);
+    }, rand(700, 1700));
+  }
+  function updateLightning(dt) {
+    if (reduce.matches || rainLevel === 0) { flash = 0; return; }
+    nextFlash -= dt;
+    if (flashT < 0 && nextFlash <= 0) { flashT = 0; nextFlash = rand(16, 32); bolt = makeBolt(); thunder(); }
+    if (flashT >= 0) {
+      flashT += dt; const f = flashT;
+      flash = f < 0.07 ? 0.9 : f < 0.14 ? 0.2 : f < 0.22 ? 0.75 : Math.max(0, 0.55 * (1 - (f - 0.22) / 0.55));
+      if (f > 0.8) { flashT = -1; flash = 0; bolt = null; }
+    }
+  }
+  function drawBolt() {
+    b.globalAlpha = Math.min(1, flash * 1.3);
+    for (let i = 1; i < bolt.pts.length; i++) line(b, bolt.pts[i - 1][0], bolt.pts[i - 1][1], bolt.pts[i][0], bolt.pts[i][1], '#eef1ff');
+    for (let i = 1; i < bolt.br.length; i++) line(b, bolt.br[i - 1][0], bolt.br[i - 1][1], bolt.br[i][0], bolt.br[i][1], '#aab4f0');
+    b.globalAlpha = 1;
+  }
+
+  // ---------- atmosphere assets: fog, bloom buffers, grain, foreground drops ----------
+  function makeFog(seed, w, h, n, col) {
+    const c = mk(w, h), g = c.getContext('2d'), R = rng(seed);
+    for (let i = 0; i < n; i++) {
+      const x = R() * w, y = h * (0.35 + R() * 0.4), r = h * (0.18 + R() * 0.3), a = 0.05 + R() * 0.09;
+      for (const ox of [-w, 0, w]) {
+        const gr = g.createRadialGradient(x + ox, y, 0, x + ox, y, r);
+        gr.addColorStop(0, `rgba(${col},${a})`); gr.addColorStop(1, `rgba(${col},0)`);
+        g.fillStyle = gr; g.fillRect(x + ox - r, y - r, 2 * r, 2 * r);
+      }
+    }
+    return c;
+  }
+  const fogBack = makeFog(3, 512, 96, 46, '118,126,205'), fogFront = makeFog(9, 512, 72, 30, '140,148,222');
+  function drawFog(tex, y, h, w, speed, alpha, t) {
+    const off = (t * speed) % w;
+    vctx.globalAlpha = alpha; vctx.imageSmoothingEnabled = true;
+    for (const x of [-off, w - off]) vctx.drawImage(tex, x * S, y * S, w * S, h * S);
+    vctx.globalAlpha = 1;
+  }
+
+  const bl0 = mk(192, 108), bl0x = bl0.getContext('2d');
+  const bl1 = mk(96, 54), bl1x = bl1.getContext('2d', { willReadFrequently: true });
+  const bl2 = mk(48, 27), bl2x = bl2.getContext('2d');
+  const bl3 = mk(24, 14), bl3x = bl3.getContext('2d');
+  // bright-pass the frame at quarter size, blur by repeated halving, add it back
+  function bloom(bob) {
+    bl0x.imageSmoothingEnabled = true;
+    bl0x.drawImage(bgBuf, 0, 0, 192, 108); bl0x.drawImage(fgBuf, 0, bob / 2, 192, (H + 4) / 2);
+    bl1x.drawImage(bl0, 0, 0, 96, 54);
+    const im = bl1x.getImageData(0, 0, 96, 54), d = im.data;
+    for (let i = 0; i < d.length; i += 4) {
+      let k = clamp((0.3 * d[i] + 0.59 * d[i + 1] + 0.11 * d[i + 2] - 100) / 130, 0, 1) ** 1.3;
+      // keep the moon's craters readable: it already has its own halo
+      const px = (i >> 2) % 96, py = (i >> 2) / 96 | 0;
+      if (Math.hypot(px - 80.25, py - 10.25) < 5) k *= 0.25;
+      d[i] *= k; d[i + 1] *= k; d[i + 2] *= k; d[i + 3] = 255;
+    }
+    bl1x.putImageData(im, 0, 0);
+    bl2x.drawImage(bl1, 0, 0, 48, 27); bl3x.drawImage(bl2, 0, 0, 24, 14);
+    vctx.globalCompositeOperation = 'lighter'; vctx.imageSmoothingEnabled = true; vctx.imageSmoothingQuality = 'high';
+    vctx.globalAlpha = 0.3; vctx.drawImage(bl1, 0, 0, view.width, view.height);
+    vctx.globalAlpha = 0.38; vctx.drawImage(bl2, 0, 0, view.width, view.height);
+    vctx.globalAlpha = 0.42; vctx.drawImage(bl3, 0, 0, view.width, view.height);
+    vctx.globalAlpha = 1;
+  }
+
+  const grain = mk(192, 192);
+  {
+    const g = grain.getContext('2d'), im = g.createImageData(192, 192), d = im.data;
+    for (let i = 0; i < d.length; i += 4) { const on = Math.random() < 0.5 ? 0 : 255; d[i] = d[i + 1] = d[i + 2] = on; d[i + 3] = Math.random() * (on ? 12 : 20); }
+    g.putImageData(im, 0, 0);
+  }
+  const grainPat = vctx.createPattern(grain, 'repeat');
+
+  const bokeh = Array.from({ length: 16 }, () => ({ x: rand(0, W), y: rand(-40, H), len: rand(16, 34), v: rand(380, 560), w: rand(1.2, 2.4), a: rand(0.035, 0.08) }));
+  function drawBokeh(dt) {
+    const n = Math.round(bokeh.length * rainLevel);
+    vctx.lineCap = 'round';
+    for (let i = 0; i < n; i++) {
+      const p = bokeh[i]; p.y += p.v * dt;
+      if (p.y > H + p.len) { p.y = -p.len - rand(0, 60); p.x = rand(0, W); }
+      vctx.strokeStyle = `rgba(200,210,255,${p.a + flash * 0.05})`; vctx.lineWidth = p.w * S * 0.6;
+      vctx.beginPath(); vctx.moveTo(p.x * S, p.y * S); vctx.lineTo(p.x * S, (p.y + p.len) * S); vctx.stroke();
+    }
+  }
+
+  function moonbeams(t) {
+    const X = 321 * S, Y = 41 * S, L = 260 * S;
+    [1.9, 2.1, 2.32, 2.55].forEach((ang, i) => {
+      const a = 0.02 + 0.014 * Math.sin(t * 0.35 + i * 1.9), w = 0.035 + (i % 2) * 0.02;
+      const gr = vctx.createLinearGradient(X, Y, X + Math.cos(ang) * L, Y + Math.sin(ang) * L);
+      gr.addColorStop(0, `rgba(170,185,255,${a})`); gr.addColorStop(1, 'rgba(170,185,255,0)');
+      vctx.fillStyle = gr; vctx.beginPath(); vctx.moveTo(X, Y);
+      vctx.lineTo(X + Math.cos(ang - w) * L, Y + Math.sin(ang - w) * L);
+      vctx.lineTo(X + Math.cos(ang + w) * L, Y + Math.sin(ang + w) * L); vctx.closePath(); vctx.fill();
+    });
+    const halo = vctx.createRadialGradient(X, Y, 15 * S, X, Y, 36 * S);
+    halo.addColorStop(0, 'rgba(190,205,255,0)'); halo.addColorStop(0.45, 'rgba(190,205,255,0.07)');
+    halo.addColorStop(0.62, 'rgba(225,200,255,0.04)'); halo.addColorStop(1, 'rgba(190,205,255,0)');
+    vctx.fillStyle = halo; vctx.fillRect(X - 36 * S, Y - 36 * S, 72 * S, 72 * S);
+  }
+
   // ---------- glow pass (full-resolution, additive) ----------
+  let gOff = 0;
   function glow(x, y, r, c, a) {
     if (a <= 0.003) return;
-    const X = x * S, Y = y * S, Rr = r * S;
+    const X = x * S, Y = (y + gOff) * S, Rr = r * S;
     const gr = vctx.createRadialGradient(X, Y, 0, X, Y, Rr);
     gr.addColorStop(0, `rgba(${c},${a})`); gr.addColorStop(0.35, `rgba(${c},${a * 0.38})`); gr.addColorStop(1, `rgba(${c},0)`);
     vctx.fillStyle = gr; vctx.fillRect(X - Rr, Y - Rr, Rr * 2, Rr * 2);
+  }
+  // flattened pool of light on the ground
+  function pool(x, y, rx, ry, c, a) {
+    if (a <= 0.003) return;
+    vctx.save(); vctx.translate(x * S, (y + gOff) * S); vctx.scale(1, ry / rx);
+    const R = rx * S, gr = vctx.createRadialGradient(0, 0, 0, 0, 0, R);
+    gr.addColorStop(0, `rgba(${c},${a})`); gr.addColorStop(1, `rgba(${c},0)`);
+    vctx.fillStyle = gr; vctx.fillRect(-R, -R, 2 * R, 2 * R); vctx.restore();
   }
 
   // ---------- main loop ----------
@@ -726,8 +897,13 @@
     if (paused || document.hidden) dt = 0;
     if (reduce.matches) dt *= 0.4;
     T += dt; dtG = dt; const t = T;
+    // the island floats: sub-pixel drift applied when compositing
+    const bob = Math.sin(t * 0.55) * 1.6 + Math.sin(t * 0.23 + 1) * 0.6, bobR = Math.round(bob);
+    updateLightning(dt);
+    updateFireflies(t);
 
-    // sky + stars
+    // ---- background layer: sky, moon, clouds, hills, far rain ----
+    b = bgx;
     b.drawImage(sky, 0, 0);
     for (const s of stars) { b.globalAlpha = s.b * (0.5 + 0.5 * Math.sin(t * s.sp + s.ph)); pix(b, s.x, s.y, s.c); }
     b.globalAlpha = 1;
@@ -738,27 +914,36 @@
       if (k > 0.8) { b.globalAlpha = 0.45; pix(b, s.x - 2, s.y, '#c9d3ff'); pix(b, s.x + 2, s.y, '#c9d3ff'); pix(b, s.x, s.y - 2, '#c9d3ff'); pix(b, s.x, s.y + 2, '#c9d3ff'); }
       b.globalAlpha = 1;
     }
-    // shooting star
     nextShoot -= dt;
     if (!shoot && nextShoot <= 0) { shoot = { x: rand(40, 260), y: rand(4, 26), life: 0 }; nextShoot = rand(9, 18); }
     if (shoot) {
       shoot.life += dt; shoot.x += 150 * dt; shoot.y += 48 * dt;
-      for (let i = 0; i < 9; i++) { b.globalAlpha = (1 - i / 9) * (1 - shoot.life / 0.7); pix(b, shoot.x - i * 3.1 / 3 * 1.5, shoot.y - i * 0.48, '#eef2ff'); }
+      for (let i = 0; i < 9; i++) { b.globalAlpha = (1 - i / 9) * (1 - shoot.life / 0.7); pix(b, shoot.x - i * 1.55, shoot.y - i * 0.48, '#eef2ff'); }
       b.globalAlpha = 1; if (shoot.life > 0.7) shoot = null;
     }
     b.drawImage(moon, 321 - 17, 41 - 17);
-    // clouds drift right and wrap
+    if (flash > 0) {
+      b.globalCompositeOperation = 'lighter'; b.fillStyle = `rgba(78,84,160,${0.42 * flash})`; b.fillRect(0, 0, W, H);
+      b.globalCompositeOperation = 'source-over';
+    }
+    // clouds drift right; edges catch moonlight near the moon and during lightning
     for (const c of clouds) {
       c.x += c.v * dt; if (c.x > W + 4) c.x = -c.c.width - 4;
+      const cx = c.x + c.c.width / 2, cy = c.y + c.c.height / 2;
+      const lit = Math.max(clamp(1 - (Math.hypot(cx - 321, (cy - 41) * 1.6) - c.c.width / 2) / 45, 0, 1) * 0.85, flash);
       b.globalAlpha = 0.93; b.drawImage(c.c, Math.round(c.x), c.y);
+      if (lit > 0.02) { b.globalAlpha = lit; b.drawImage(c.l, Math.round(c.x), c.y); }
     }
     b.globalAlpha = 1;
+    if (bolt && flash > 0.3) drawBolt();
     b.drawImage(hills, 0, 0);
-    drawRain(dt, false);
+    drawRain(dt, false, 0);
 
-    // island scene
+    // ---- island layer ----
+    b = fgx; b.clearRect(0, 0, W, H + 4);
     drawWater(t);
     const boatLamp = drawBoat(t);
+    drawReflections(t, boatLamp);
     drawWaterfall(t);
     b.drawImage(isl, 0, 0);
     const fire = 0.75 + 0.15 * Math.sin(t * 9.1) + 0.1 * Math.sin(t * 23.7 + 1) + (Math.random() - 0.5) * 0.08;
@@ -766,61 +951,68 @@
     // street lamp glass, with an occasional flicker
     const lp = t % 11; const lampOn = (lp > 7.2 && lp < 7.5 && Math.sin(t * 60) > 0) ? 0.25 : 1;
     rect(b, 158, 87, 2, 5, lampOn > 0.5 ? '#ffe39a' : '#8a7a58');
-    // crystal twinkle
     const cr = (Math.sin(t * 1.8) + 1) / 2; b.globalAlpha = cr; pix(b, 182, 165, '#ffffff'); pix(b, 186, 167, '#e0feff'); b.globalAlpha = 1;
     drawSmoke(t, dt);
     spawnFire(dt, t);
     drawFire(t, dt);
     drawPerson(t);
     drawSmall(dt, t);
-    // floating lanterns
     const lpos = lanterns.map(([x, y], i) => {
       const ly = y + Math.round(Math.sin(t * 1.3 + i * 2.1) * 1.4);
       sprite(b, x - 2, ly, ['.kkk.', 'kLLLk', 'LLHLL', 'LHHHL', 'LLHLL', '.LLL.', '..k..'], { k: '#4a3530', L: '#e8c07a', H: '#fff2c8' });
       return [x, ly + 3];
     });
-    // fireflies
     for (const f of fireflies) {
-      f.x = f.bx + Math.sin(t * f.a + f.ph) * 9 + Math.sin(t * 1.7 * f.a + f.ph * 2) * 3;
-      f.y = f.by + Math.sin(t * f.bq + f.ph * 1.3) * 5;
-      f.k = Math.max(0, Math.sin(t * f.bl + f.ph)) ** 0.6;
       if (f.k < 0.05) continue;
       b.globalAlpha = f.k;
       if (f.k > 0.6) rect(b, f.x, f.y, 2, 2, '#aefcff'); else pix(b, f.x, f.y, '#7fe6f2');
       b.globalAlpha = 1;
     }
-    // drips under the island
     for (const d of drips) {
       if (!d.falling) {
         d.phase += dt / d.grow;
-        b.globalAlpha = Math.min(1, d.phase); pix(b, d.sx, d.sy, '#8ff0ff'); b.globalAlpha = 1;
+        b.globalAlpha = clamp(d.phase, 0, 1); pix(b, d.sx, d.sy, '#8ff0ff'); b.globalAlpha = 1;
         if (d.phase >= 1) { d.falling = true; d.y = d.sy; d.v = 0; }
       } else {
         d.v += 120 * dt; d.y += d.v * dt;
         pix(b, d.sx, d.y, '#8ff0ff'); pix(b, d.sx, d.y - 1, '#4ab8cc');
-        if (d.y > H + 2) { d.falling = false; d.phase = -rand(0.2, 1.5); d.grow = rand(1.4, 3); }
+        if (d.y > H + 4) { d.falling = false; d.phase = -rand(0.2, 1.5); d.grow = rand(1.4, 3); }
       }
     }
-    drawRain(dt, true);
+
+    // ---- near rain layer ----
+    b = nrx; b.clearRect(0, 0, W, H);
+    drawRain(dt, true, bobR);
 
     // ---- compose to screen ----
+    const VW = view.width, VH = view.height;
     vctx.globalCompositeOperation = 'source-over';
     vctx.imageSmoothingEnabled = false;
-    vctx.drawImage(buf, 0, 0, view.width, view.height);
+    vctx.drawImage(bgBuf, 0, 0, VW, VH);
+    drawFog(fogBack, 128, 72, 480, 2.6, 1, t);
+    vctx.imageSmoothingEnabled = false;
+    vctx.drawImage(fgBuf, 0, bob * S, VW, (H + 4) * S);
+    vctx.drawImage(nrBuf, 0, 0, VW, VH);
+
     vctx.globalCompositeOperation = 'lighter';
-    glow(321, 41, 44, '190,205,255', 0.11);
+    gOff = 0;
+    moonbeams(t);
+    glow(321, 41, 44, '190,205,255', 0.09);
+    if (bolt && flash > 0) glow(bolt.pts[4][0], 110, 90, '140,150,255', 0.22 * flash);
+    gOff = bob;
     glow(158.5, 89, 22, '255,205,130', 0.42 * lampOn); glow(158.5, 89, 6, '255,235,180', 0.5 * lampOn);
-    // lamp light cone
     {
-      const g = vctx.createLinearGradient(0, 91 * S, 0, 136 * S);
+      const g = vctx.createLinearGradient(0, (91 + bob) * S, 0, (136 + bob) * S);
       g.addColorStop(0, `rgba(255,210,140,${0.17 * lampOn})`); g.addColorStop(1, 'rgba(255,210,140,0)');
-      vctx.fillStyle = g; vctx.beginPath(); vctx.moveTo(157 * S, 91 * S); vctx.lineTo(160 * S, 91 * S);
-      vctx.lineTo(176 * S, 136 * S); vctx.lineTo(138 * S, 136 * S); vctx.closePath(); vctx.fill();
+      vctx.fillStyle = g; vctx.beginPath(); vctx.moveTo(157 * S, (91 + bob) * S); vctx.lineTo(160 * S, (91 + bob) * S);
+      vctx.lineTo(176 * S, (136 + bob) * S); vctx.lineTo(138 * S, (136 + bob) * S); vctx.closePath(); vctx.fill();
     }
     glow(181, 119.5, 8, '255,200,120', 0.35);
     glow(185.5, 101, 17, '255,165,70', 0.26); glow(232.5, 101, 17, '255,165,70', 0.26);
     glow(212, 123, 20, '255,160,70', 0.26 * (0.8 + fire * 0.2)); glow(196, 124, 8, '255,140,60', 0.2);
     glow(262, 129, 48 + fire * 6, '255,130,45', 0.34 * fire + 0.1); glow(262, 130, 12, '255,210,120', 0.45 * fire);
+    pool(262, 136, 36, 6, '255,140,50', 0.24 * fire); pool(158.5, 136, 18, 4, '255,205,130', 0.22 * lampOn);
+    pool(212, 136, 16, 3, '255,160,70', 0.14); pool(196, 136, 9, 3, '255,140,60', 0.12); pool(118, 139, 12, 3, '255,200,120', 0.16);
     for (const [x, y] of lpos) glow(x, y, 12, '255,215,140', 0.34);
     glow(boatLamp[0], boatLamp[1], 9, '255,210,130', 0.38);
     for (const f of fireflies) if (f.k > 0.05) glow(f.x + 0.5, f.y + 0.5, 8, '90,230,255', 0.5 * f.k);
@@ -828,11 +1020,19 @@
     glow(108, 146, 42, '60,190,220', 0.06); glow(65, 150, 14, '90,210,235', 0.08);
     for (const d of drips) glow(d.sx + 0.5, d.falling ? d.y : d.sy, 4, '120,235,255', d.falling ? 0.4 : 0.4 * clamp(d.phase, 0, 1));
     for (const s of sparks) glow(s.x, s.y, 3, '255,150,60', 0.3 * (1 - s.life / s.max));
+    gOff = 0;
+    bloom(bob);
+    vctx.globalCompositeOperation = 'lighter';
+    drawBokeh(dt);
+    if (flash > 0) { vctx.fillStyle = `rgba(100,110,200,${0.1 * flash})`; vctx.fillRect(0, 0, VW, VH); }
+
     vctx.globalCompositeOperation = 'source-over';
-    // cinematic vignette and horizon haze
-    const vg = vctx.createRadialGradient(view.width / 2, view.height * 0.55, view.height * 0.3, view.width / 2, view.height * 0.55, view.width * 0.65);
+    drawFog(fogFront, 174, 50, 420, 6, 0.8, t);
+    const vg = vctx.createRadialGradient(VW / 2, VH * 0.55, VH * 0.3, VW / 2, VH * 0.55, VW * 0.65);
     vg.addColorStop(0, 'rgba(4,4,14,0)'); vg.addColorStop(1, 'rgba(4,4,14,0.55)');
-    vctx.fillStyle = vg; vctx.fillRect(0, 0, view.width, view.height);
+    vctx.fillStyle = vg; vctx.fillRect(0, 0, VW, VH);
+    const ox = Math.random() * 192 | 0, oy = Math.random() * 192 | 0;
+    vctx.save(); vctx.translate(-ox, -oy); vctx.fillStyle = grainPat; vctx.fillRect(ox, oy, VW, VH); vctx.restore();
   }
   requestAnimationFrame(frame);
 })();
